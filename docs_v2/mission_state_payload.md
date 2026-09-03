@@ -4,7 +4,9 @@
 
 ## Mission manager callback ve topic’leri
 
-**[Kodla doğrulandı]** `mission_manager_node.py` abonelikleri: `/fusion/target`, `/drone/state`, `/drone/local_position`, `/drone/altitude`, `/safety/status`, `/mission/cmd_start`. Yayınları: `/drone/cmd_mode`, `/drone/cmd_arm`, `/drone/cmd_takeoff`, `/drone/cmd_velocity`, `/drone/cmd_land`, `/drone/cmd_drop`, `/mission/state`, `/mission/event`.
+**[Kodla doğrulandı]** `mission_manager_node.py` abonelikleri: `/fusion/target`, `/drone/state`, `/drone/local_position`, `/drone/altitude`, `/drone/global_origin`, `/safety/status`, `/mission/cmd_start`. Yayınları: `/drone/cmd_mode`, `/drone/cmd_arm`, `/drone/cmd_takeoff`, `/drone/cmd_velocity`, `/drone/cmd_land`, `/drone/cmd_drop`, `/mission/state`, `/mission/event`.
+
+`mission_field_path` boş değilse MissionManager init sırasında `mission_field.json` WGS84 köşelerini yükler. Dosya invalid ise veya `/drone/global_origin` henüz valid gelmediyse normal state machine/action tick’i çalışmaz; `/mission/state` şu precondition payload’ını yayınlar: `{"state":"FIELD_NOT_READY","field_ready":false,"field_configured":true,"field_error":"..."}`. `mission_field_path` boşsa legacy rectangle davranışında origin gerekmez.
 
 ## Start/autostart davranışı
 
@@ -29,7 +31,7 @@ Aktif geçiş: `INIT -> WAIT_FOR_CAMERA -> CONNECT_MAVLINK -> SET_GUIDED -> ARM 
 | `SET_GUIDED` | `drone_state.mode == GUIDED` | `ARM` | `/drone/cmd_mode` periyodik `set_mode GUIDED`. |
 | `ARM` | `drone_state.armed` | `TAKEOFF` | Gerekirse mode tekrar, `/drone/cmd_arm`. |
 | `TAKEOFF` | `abs(altitude-takeoff_altitude) <= altitude_tolerance` | `SEARCH_TARGET` | Gerekirse mode/arm, `/drone/cmd_takeoff`. |
-| `SEARCH_TARGET` | `target is not None` | `TARGET_CANDIDATE` | Lawnmower velocity; sadece burada mission geofence clamp. |
+| `SEARCH_TARGET` | `target is not None` | `TARGET_CANDIDATE` | Lawnmower velocity. Legacy modda mission geofence clamp burada uygulanır; field modda search field-local `u/v` hesaplanıp LOCAL_NED hız yayınlanır ve eski axis-aligned clamp uygulanmaz. |
 | `TARGET_CANDIDATE` | target yok | `SEARCH_TARGET` | Seçili hedef varsa align velocity. |
 | `TARGET_CANDIDATE` | target var | `TARGET_ALIGN` | Seçili hedef varsa align velocity. |
 | `TARGET_ALIGN` | target yok | `SEARCH_TARGET` | Align velocity. |
@@ -59,6 +61,8 @@ Aktif geçiş: `INIT -> WAIT_FOR_CAMERA -> CONNECT_MAVLINK -> SET_GUIDED -> ARM 
 | `safety_level` | `/safety/status.status` | Rich payload içinden yalnız bu string okunur. |
 | `drop_done` | `not PayloadController.can_release(active_target)` | Mission payload set’i; bridge sonucu beklenmez. |
 | `return_confirmed` | `/drone/state.mode == "RTL"` | ACK değil, telemetry mode kontrolü. |
+
+Field precondition bu tabloya girmeden önce değerlendirilir: field configured ve hazır değilse `MissionInputs` oluşturulmaz, arm/takeoff/search/drop action publish edilmez.
 
 ## Target selection ve promotion
 

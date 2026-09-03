@@ -9,6 +9,8 @@ far lane start before the first useful scan.
 
 from dataclasses import dataclass
 
+from teknofest_iha.core.field_geometry import FieldGeometry, LocalPoint
+
 
 @dataclass
 class LawnmowerSearchPattern:
@@ -152,3 +154,52 @@ class LawnmowerSearchPattern:
         dx = tx - x
         dy = ty - y
         return dx * dx + dy * dy
+
+
+class FieldLawnmowerSearchPattern:
+    """Lawnmower search in FieldGeometry u/v, exposed as LOCAL_NED XY."""
+
+    def __init__(self, geometry: FieldGeometry, lane_spacing_m: float) -> None:
+        self.geometry = geometry
+        self.pattern = LawnmowerSearchPattern(
+            geometry.u_min,
+            geometry.u_max,
+            geometry.v_min,
+            geometry.v_max,
+            lane_spacing_m,
+        )
+
+    def waypoints_from_start(self, start_from_x_max: bool) -> list[tuple[float, float]]:
+        return [
+            self._uv_to_ned_tuple(u, v)
+            for u, v in self.pattern.waypoints_from_start(start_from_x_max)
+        ]
+
+    def start_from_x_max_is_nearest(self, x: float, y: float) -> bool:
+        u, v = self.geometry.ned_to_field_uv(LocalPoint(x, y))
+        return self.pattern.start_from_x_max_is_nearest(u, v)
+
+    def next_velocity_from_start(
+        self,
+        x: float,
+        y: float,
+        waypoint_index: int,
+        speed_mps: float,
+        acceptance_radius_m: float,
+        start_from_x_max: bool,
+    ) -> tuple[int, float, float]:
+        u, v = self.geometry.ned_to_field_uv(LocalPoint(x, y))
+        index, vu, vv = self.pattern.next_velocity_from_start(
+            u,
+            v,
+            waypoint_index,
+            speed_mps,
+            acceptance_radius_m,
+            start_from_x_max,
+        )
+        vx, vy = self.geometry.vector_field_uv_to_ned(vu, vv)
+        return index, vx, vy
+
+    def _uv_to_ned_tuple(self, u: float, v: float) -> tuple[float, float]:
+        point = self.geometry.field_uv_to_ned(u, v)
+        return point.x, point.y

@@ -33,20 +33,27 @@ Köprü paramları: `connection`, `heartbeat_timeout_s`, `telemetry_rate_hz`, `c
 | Pub | `/drone/state` | `state_pub` | `DroneState.to_json()`. |
 | Pub | `/drone/local_position` | `local_pub` | `LocalPosition.to_json()`. |
 | Pub | `/drone/altitude` | `altitude_pub` | `Altitude.to_json()`. |
+| Pub | `/drone/global_position` | `global_position_pub` | `GlobalPosition.to_json()`. |
+| Pub | `/drone/gps_status` | `gps_status_pub` | `GpsStatus.to_json()`; `eph/epv` raw MAVLink numeric values, `hdop=null`. |
+| Pub | `/drone/global_origin` | `global_origin_pub` | `GlobalOrigin.to_json()`. |
+| Pub | `/drone/home_position` | `home_position_pub` | `HomePosition.to_json()`. |
 | Pub | `/drone/status` | `status_pub` | CONNECTED/OK/ERROR/DROP_DRY_RUN JSON. |
 
 ## Telemetry parsing ve ACK limitleri
 
 - **[Kodla doğrulandı]** Adapter heartbeat bekler, GCS heartbeat gönderir, data stream request eder.
-- **[Kodla doğrulandı]** Parse edilen mesajlar: `HEARTBEAT`, `LOCAL_POSITION_NED`, `GLOBAL_POSITION_INT`.
-- **[Kodla doğrulandı]** `COMMAND_ACK`, battery, GPS quality, EKF, FC failsafe parse edilmiyor. Heartbeat timeout sonrası sürekli health kapsamı sınırlı.
+- **[Kodla doğrulandı]** Parse edilen mesajlar: `HEARTBEAT`, `LOCAL_POSITION_NED`, `GLOBAL_POSITION_INT`, `GPS_RAW_INT`, `GPS_GLOBAL_ORIGIN`, `HOME_POSITION`.
+- **[Kodla doğrulandı]** GPS quality yalnız `GPS_RAW_INT` üzerinden sınırlı olarak `/drone/gps_status` topic’inde expose edilir; `COMMAND_ACK`, battery, EKF, FC failsafe parse edilmiyor. Heartbeat timeout sonrası sürekli health kapsamı sınırlı.
 - **[Kodla doğrulandı]** Arm/takeoff/mode komutlarında dry-run yoktur; gerçek bridge bağlıysa komut gönderir. Mode/arm success sadece telemetry state’e bakılarak beklenir, ACK yoktur.
 
 | MAVLink message | Kod | ROS alanı | Limit |
 |---|---|---|---|
 | `HEARTBEAT` | `_update_heartbeat()` | `DroneState.connected=True`, `armed`, `mode`, system/component, `last_heartbeat_s` | Heartbeat sonrası health/failsafe ayrıntısı parse edilmez. |
 | `LOCAL_POSITION_NED` | `_handle_message()` | `LocalPosition(x,y,z,vx,vy,vz,frame="NED")` | Local origin ve frame hizası donanımda doğrulanmadı. |
-| `GLOBAL_POSITION_INT` | `_handle_message()` | `Altitude(relative_m=relative_alt/1000, amsl_m=alt/1000)` | GPS kalite/fix sayısı parse edilmez. |
+| `GLOBAL_POSITION_INT` | `_handle_message()` | Eski `/drone/altitude`: `Altitude(relative_m=relative_alt/1000, amsl_m=alt/1000)`; ek `/drone/global_position`: `lat_deg/lon_deg` degE7->degree, altitude mm->m | Converter/projection yok. |
+| `GPS_RAW_INT` | `_handle_message()` | `/drone/gps_status`: `fix_type`, `satellites_visible`, raw numeric `eph/epv`, `hdop=null` | `eph/epv` birimi over-interpret edilmez. |
+| `GPS_GLOBAL_ORIGIN` | `_handle_message()` | `/drone/global_origin`: `lat_deg/lon_deg` degE7->degree, `alt_m` mm->m | Mesaj gelmezse default `null` alanlar yayınlanır. |
+| `HOME_POSITION` | `_handle_message()` | `/drone/home_position`: `lat_deg/lon_deg` degE7->degree, `alt_m` mm->m, `x/y/z` float | Home availability FC davranışına bağlıdır. |
 | `COMMAND_ACK` | Yok | Yok | Komut kabul/ret bilgisi gözden kaçabilir. |
 | Battery/GPS/EKF/failsafe | Yok | Yok | `/drone/status` health kapsamı sınırlı. |
 

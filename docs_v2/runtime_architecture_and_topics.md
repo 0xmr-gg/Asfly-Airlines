@@ -6,8 +6,8 @@
 
 - **[Kodla doğrulandı]** `perception_node`: `sensor_msgs/Image` kamera alır, OpenCV sonucu `/perception/raw_detections` JSON ve opsiyonel `/perception/debug_image` yayınlar.
 - **[Kodla doğrulandı]** `fusion_node`: `/perception/raw_detections` tüketir, `/fusion/target` ve `/fusion/status` yayınlar.
-- **[Kodla doğrulandı]** `mission_manager_node`: `/fusion/target`, `/drone/state`, `/drone/local_position`, `/drone/altitude`, `/safety/status`, `/mission/cmd_start` tüketir; `/drone/cmd_mode`, `/drone/cmd_arm`, `/drone/cmd_takeoff`, `/drone/cmd_velocity`, `/drone/cmd_land`, `/drone/cmd_drop`, `/mission/state`, `/mission/event` yayınlar.
-- **[Kodla doğrulandı]** `mavlink_bridge_node`: `/drone/cmd_*` tüketir, `/drone/state`, `/drone/local_position`, `/drone/altitude`, `/drone/status` yayınlar. Ek gizli/az dokümante tüketici: `/drone/cmd_position`.
+- **[Kodla doğrulandı]** `mission_manager_node`: `/fusion/target`, `/drone/state`, `/drone/local_position`, `/drone/altitude`, `/drone/global_origin`, `/safety/status`, `/mission/cmd_start` tüketir; `/drone/cmd_mode`, `/drone/cmd_arm`, `/drone/cmd_takeoff`, `/drone/cmd_velocity`, `/drone/cmd_land`, `/drone/cmd_drop`, `/mission/state`, `/mission/event` yayınlar.
+- **[Kodla doğrulandı]** `mavlink_bridge_node`: `/drone/cmd_*` tüketir, `/drone/state`, `/drone/local_position`, `/drone/altitude`, `/drone/global_position`, `/drone/gps_status`, `/drone/global_origin`, `/drone/home_position`, `/drone/status` yayınlar. Ek gizli/az dokümante tüketici: `/drone/cmd_position`.
 - **[Kodla doğrulandı]** `safety_monitor_node`: `/drone/local_position` tüketir, `/safety/status` yayınlar.
 
 Runtime topic’lerinin çoğu gerçek ROS custom message değil, `std_msgs/msg/String` içinde JSON taşır. Görüntü tarafında `sensor_msgs/msg/Image` kullanılır. JSON şemaları dataclass ve helper fonksiyonlarla kısmen merkezileşmiştir (`teknofest_iha/interfaces/detection_models.py`, `teknofest_iha/interfaces/drone_models.py`), fakat schema registry/ROS IDL yoktur.
@@ -33,9 +33,13 @@ Runtime topic’lerinin çoğu gerçek ROS custom message değil, `std_msgs/msg/
 | `/drone/state` | `std_msgs/String` JSON | `mavlink_bridge_node` | `mission_manager_node` | `DroneState`: connected/armed/mode/system/component/heartbeat. |
 | `/drone/local_position` | `std_msgs/String` JSON | `mavlink_bridge_node` | `mission_manager_node`, `safety_monitor_node` | `LocalPosition`: NED x/y/z/vx/vy/vz. |
 | `/drone/altitude` | `std_msgs/String` JSON | `mavlink_bridge_node` | `mission_manager_node` | `Altitude`: relative/AMSL. Mission local z negatifse onu öncelikli kullanır. |
+| `/drone/global_position` | `std_msgs/String` JSON | `mavlink_bridge_node` | Henüz mission consumer yok | `GlobalPosition`: `lat_deg,lon_deg,relative_m,amsl_m,timestamp`; `GLOBAL_POSITION_INT` parse-if-arrives. |
+| `/drone/gps_status` | `std_msgs/String` JSON | `mavlink_bridge_node` | Henüz mission consumer yok | `GpsStatus`: `fix_type,satellites_visible,eph,epv,hdop,timestamp`; `eph/epv` raw MAVLink numeric, `hdop=null`. |
+| `/drone/global_origin` | `std_msgs/String` JSON | `mavlink_bridge_node` | `mission_manager_node` | `GlobalOrigin`: `lat_deg,lon_deg,alt_m,timestamp`; `GPS_GLOBAL_ORIGIN` parse-if-arrives. `mission_field_path` configured ise field WGS84->LOCAL_NED geometry için precondition’dır. |
+| `/drone/home_position` | `std_msgs/String` JSON | `mavlink_bridge_node` | Henüz mission consumer yok | `HomePosition`: `lat_deg,lon_deg,alt_m,x,y,z,timestamp`; `HOME_POSITION` parse-if-arrives. |
 | `/drone/status` | `std_msgs/String` JSON | `mavlink_bridge_node` | Gözlemsel/console bağlamı | CONNECTED/OK/ERROR/DROP_DRY_RUN; ACK health kapsamı sınırlı. |
 | `/safety/status` | `std_msgs/String` JSON | `safety_monitor_node` | `mission_manager_node` | Rich JSON yayınlanır; mission sadece `status` alanını okur. |
-| `/mission/state` | `std_msgs/String` JSON | `mission_manager_node` | Console/recorder/debug bağlamı | State, active target, search status, nav/local konum. |
+| `/mission/state` | `std_msgs/String` JSON | `mission_manager_node` | Console/recorder/debug bağlamı | State, active target, search status, nav/local konum. Field configured ama hazır değilse `FIELD_NOT_READY` + `field_ready:false` + `field_error`. |
 | `/mission/event` | `std_msgs/String` JSON | `mission_manager_node` | Recorder/console bağlamı | Drop event’i `/drone/cmd_drop` ile aynı payload olabilir. |
 | `/mission/cmd_start` | `std_msgs/String` | Harici operator/console **[Repo’dan çıkarılamaz]** | `mission_manager_node.on_start_command()` | `start,true,1,go` kabul edilir. Field autostart false iken gerekir. |
 
@@ -43,7 +47,7 @@ Runtime topic’lerinin çoğu gerçek ROS custom message değil, `std_msgs/msg/
 
 | Launch | Başlatılan ana node/process | Config defaultları | Autostart sonucu | Caveat |
 |---|---|---|---|---|
-| `launch/field_mission.launch.py` | perception, fusion, mavlink_bridge, safety_monitor, mission_manager, mission_console | perception/fusion/mission + `mavlink_gcs_router.yaml` | Launch arg default `false`, mission param override edilir | Saha/GCS router profili; `/mission/cmd_start` gerekir. |
+| `launch/field_mission.launch.py` | perception, fusion, mavlink_bridge, safety_monitor, mission_manager, mission_console | perception/fusion/mission + `mavlink_gcs_router.yaml` | Launch arg default `false`, mission param override edilir | Saha/GCS router profili; `/mission/cmd_start` gerekir. Field Setup Tool çıktısı için `mission_field_path:=/path/to/mission_field.json` verilebilir. |
 | `launch/mission.launch.py` | mavlink_bridge, safety_monitor, mission_manager | `mission.yaml`, `mavlink.yaml` | Override yok; `MissionManagerNode` default `autostart=True` çünkü `mission.yaml` autostart içermez | Perception/fusion yoksa `WAIT_FOR_CAMERA` bekler. |
 | `launch/perception.launch.py` | perception, fusion | `perception.yaml`, `fusion.yaml` | Mission yok | Algı-füzyon izolasyonu. |
 | `launch/full_sim.launch.py` | camera bridge process, frame repeater, perception, fusion, mavlink, safety, mission | perception/fusion/mission + `mavlink.yaml` | Override yok; mission default true | Gazebo/SITL içeriği var; bu görevde çalıştırılmadı. |
@@ -58,6 +62,10 @@ Runtime topic’lerinin çoğu gerçek ROS custom message değil, `std_msgs/msg/
 - `/drone/state`: `DroneState(connected,armed,mode,system_id,component_id,last_heartbeat_s,timestamp)`.
 - `/drone/local_position`: `LocalPosition(x,y,z,vx,vy,vz,frame,timestamp)`; NED varsayılır.
 - `/drone/altitude`: `Altitude(relative_m,amsl_m,timestamp)`.
+- `/drone/global_position`: `GlobalPosition(lat_deg,lon_deg,relative_m,amsl_m,timestamp)`; converter/projection katmanı yoktur.
+- `/drone/gps_status`: `GpsStatus(fix_type,satellites_visible,eph,epv,hdop,timestamp)`; `eph/epv` raw MAVLink numeric olarak taşınır, `hdop` güvenli eşleme olmadığı için `null`.
+- `/drone/global_origin`: `GlobalOrigin(lat_deg,lon_deg,alt_m,timestamp)`.
+- `/drone/home_position`: `HomePosition(lat_deg,lon_deg,alt_m,x,y,z,timestamp)`.
 - `/safety/status`: rich JSON: `status,x,y,local_x,local_y,coordinate_frame,timestamp`.
 
 ## Komut şemaları

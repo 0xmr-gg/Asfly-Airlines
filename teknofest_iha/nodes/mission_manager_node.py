@@ -19,15 +19,16 @@ from std_msgs.msg import String
 
 from teknofest_iha.core.alignment_controller import AlignmentController
 from teknofest_iha.core.coordinate_frame import CoordinateFrameMapper
+from teknofest_iha.core.field_geometry import FieldConfigError, FieldGeometry, build_field_geometry, load_mission_field
 from teknofest_iha.core.geofence import Geofence
 from teknofest_iha.core.mission_states import MissionState
 from teknofest_iha.core.payload_controller import PayloadController
 from teknofest_iha.core.payload_metrics import TargetSpec, estimate_payload_drop
-from teknofest_iha.core.search_pattern import LawnmowerSearchPattern
+from teknofest_iha.core.search_pattern import FieldLawnmowerSearchPattern, LawnmowerSearchPattern
 from teknofest_iha.core.state_machine import MissionInputs, MissionStateMachine
 from teknofest_iha.core.target_selection import choose_visible_unreleased_target
 from teknofest_iha.interfaces.detection_models import FusedTargetPacket
-from teknofest_iha.interfaces.drone_models import Altitude, DroneState, LocalPosition, command_json
+from teknofest_iha.interfaces.drone_models import Altitude, DroneState, GlobalOrigin, LocalPosition, command_json
 
 
 class MissionManagerNode(Node):
@@ -65,6 +66,7 @@ class MissionManagerNode(Node):
         self.declare_parameter("payload_hold_seconds", 0.8)
         self.declare_parameter("coordinate_frame", "identity")
         self.declare_parameter("autostart", True)
+        self.declare_parameter("mission_field_path", "")
         self.declare_parameter(
             "target_specs_json",
             '{"blue_square":{"center":[62.0,-5.0],"size":[2.0,2.0]},"red_square":{"center":[45.0,4.0],"size":[1.0,1.0]}}',
@@ -105,6 +107,7 @@ class MissionManagerNode(Node):
             float(self.get_parameter("search_y_max").value),
             float(self.get_parameter("lane_spacing_m").value),
         )
+        self.field_search: FieldLawnmowerSearchPattern | None = None
         self.geofence = Geofence(
             float(self.get_parameter("search_x_min").value),
             float(self.get_parameter("search_x_max").value),
@@ -112,6 +115,17 @@ class MissionManagerNode(Node):
             float(self.get_parameter("search_y_max").value),
         )
         self.frame_mapper = CoordinateFrameMapper(str(self.get_parameter("coordinate_frame").value))
+        self.mission_field_path = str(self.get_parameter("mission_field_path").value).strip()
+        self.field_corners_wgs84 = None
+        self.global_origin: GlobalOrigin | None = None
+        self.field_geometry: FieldGeometry | None = None
+        self.field_error: str | None = None
+        if self.mission_field_path:
+            try:
+                self.field_corners_wgs84 = load_mission_field(self.mission_field_path)
+            except FieldConfigError as exc:
+                self.field_error = str(exc)
+                self.get_logger().error(f"Mission field is not ready: {self.field_error}")
 
         self.drone_state = DroneState()
         self.local_position = LocalPosition()
@@ -140,6 +154,7 @@ class MissionManagerNode(Node):
         self.create_subscription(String, "/drone/state", self.on_drone_state, 10)
         self.create_subscription(String, "/drone/local_position", self.on_local_position, 10)
         self.create_subscription(String, "/drone/altitude", self.on_altitude, 10)
+        self.create_subscription(String, "/drone/global_origin", self.on_global_origin, 10)
         self.create_subscription(String, "/safety/status", self.on_safety, 10)
         self.create_subscription(String, "/mission/cmd_start", self.on_start_command, 10)
         rate = float(self.get_parameter("control_rate_hz").value)
@@ -156,6 +171,15 @@ class MissionManagerNode(Node):
 
     def on_altitude(self, msg: String) -> None:
         self.altitude = Altitude.from_json(msg.data)
+
+    def on_global_origin(self, msg: String) -> None:
+        try:
+            self.global_origin = GlobalOrigin.from_json(msg.data)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            if self.mission_field_path and self.field_geometry is None:
+                self.field_error = f"invalid /drone/global_origin: {exc}"
+            return
+        self._try_build_field_geometry()
 
     def on_safety(self, msg: String) -> None:
         self.safety_status = str(json.loads(msg.data).get("status", "OK"))
@@ -185,6 +209,11 @@ class MissionManagerNode(Node):
         return specs
 
     def on_timer(self) -> None:
+        if self.mission_field_path and not self._field_ready():
+            self._try_build_field_geometry()
+            if not self._field_ready():
+                self._publish_field_not_ready()
+                return
         if not self.mission_started:
             self._publish_waiting_for_start()
             return
@@ -223,7 +252,61 @@ class MissionManagerNode(Node):
                         "state": "WAIT_START",
                         "active_target": self.state_machine.active_target or self.primary_target,
                         "altitude_m": self._relative_altitude_m(),
+                        **self._field_status(),
                     }
+                )
+            )
+        )
+
+    def _try_build_field_geometry(self) -> None:
+        if not self.mission_field_path or self.field_geometry is not None or self.field_corners_wgs84 is None:
+            return
+        if self.global_origin is None:
+            if self.field_error is None:
+                self.field_error = "waiting for /drone/global_origin"
+            return
+        try:
+            self.field_geometry = build_field_geometry(self.field_corners_wgs84, self.global_origin)
+            self.field_search = FieldLawnmowerSearchPattern(
+                self.field_geometry,
+                float(self.get_parameter("lane_spacing_m").value),
+            )
+            self.field_error = None
+            self.get_logger().info("Mission field geometry is ready")
+        except FieldConfigError as exc:
+            self.field_error = str(exc)
+
+    def _field_ready(self) -> bool:
+        return not self.mission_field_path or self.field_geometry is not None
+
+    def _field_status(self) -> dict:
+        if not self.mission_field_path:
+            return {"field_ready": True, "field_configured": False}
+        payload = {"field_ready": self.field_geometry is not None, "field_configured": True}
+        if self.field_error:
+            payload["field_error"] = self.field_error
+        if self.field_geometry is not None:
+            payload["field"] = {
+                "area_m2": self.field_geometry.area_m2,
+                "center_ned": [self.field_geometry.center.x, self.field_geometry.center.y],
+                "long_length_m": self.field_geometry.long_length_m,
+                "short_length_m": self.field_geometry.short_length_m,
+            }
+        return payload
+
+    def _publish_field_not_ready(self) -> None:
+        error = self.field_error or "waiting for /drone/global_origin"
+        self.state_pub.publish(
+            String(
+                data=json.dumps(
+                    {
+                        "state": "FIELD_NOT_READY",
+                        "field_ready": False,
+                        "field_configured": True,
+                        "field_error": error,
+                        "timestamp": time.time(),
+                    },
+                    separators=(",", ":"),
                 )
             )
         )
@@ -327,22 +410,41 @@ class MissionManagerNode(Node):
                 self._publish_periodic("TAKEOFF_ARM", self.arm_pub, command_json("arm", arm=True))
             self._publish_periodic(name, self.takeoff_pub, command_json("takeoff", altitude_m=self.takeoff_altitude_m))
         elif state == MissionState.SEARCH_TARGET:
-            nav_x, nav_y = self.frame_mapper.nav_xy_from_local(self.local_position.x, self.local_position.y)
-            if self.search_start_from_x_max is None:
-                self.search_start_from_x_max = self.search.start_from_x_max_is_nearest(nav_x, nav_y)
-            self.search_index, vx, vy = self.search.next_velocity_from_start(
-                nav_x,
-                nav_y,
-                self.search_index,
-                float(self.get_parameter("search_speed_mps").value),
-                self.search_acceptance_radius_m,
-                self.search_start_from_x_max,
-            )
-            if abs(vx) >= abs(vy) and abs(vx) > 0.05:
-                self.alignment_forward_sign = 1.0 if vx >= 0.0 else -1.0
-            vx, vy = self.geofence.clamp_velocity(nav_x, nav_y, vx, vy)
-            local_vx, local_vy = self.frame_mapper.local_velocity_from_nav(vx, vy)
-            self.velocity_pub.publish(String(data=command_json("velocity", vx=local_vx, vy=local_vy, vz=self._restore_search_altitude_vz())))
+            if self.field_search is not None and self.field_geometry is not None:
+                ned_x, ned_y = self.local_position.x, self.local_position.y
+                if self.search_start_from_x_max is None:
+                    self.search_start_from_x_max = self.field_search.start_from_x_max_is_nearest(ned_x, ned_y)
+                self.search_index, vx, vy = self.field_search.next_velocity_from_start(
+                    ned_x,
+                    ned_y,
+                    self.search_index,
+                    float(self.get_parameter("search_speed_mps").value),
+                    self.search_acceptance_radius_m,
+                    self.search_start_from_x_max,
+                )
+                vu, vv = self.field_geometry.vector_ned_to_field_uv(vx, vy)
+                if abs(vu) >= abs(vv) and abs(vu) > 0.05:
+                    self.alignment_forward_sign = 1.0 if vu >= 0.0 else -1.0
+                self.velocity_pub.publish(
+                    String(data=command_json("velocity", vx=vx, vy=vy, vz=self._restore_search_altitude_vz()))
+                )
+            else:
+                nav_x, nav_y = self.frame_mapper.nav_xy_from_local(self.local_position.x, self.local_position.y)
+                if self.search_start_from_x_max is None:
+                    self.search_start_from_x_max = self.search.start_from_x_max_is_nearest(nav_x, nav_y)
+                self.search_index, vx, vy = self.search.next_velocity_from_start(
+                    nav_x,
+                    nav_y,
+                    self.search_index,
+                    float(self.get_parameter("search_speed_mps").value),
+                    self.search_acceptance_radius_m,
+                    self.search_start_from_x_max,
+                )
+                if abs(vx) >= abs(vy) and abs(vx) > 0.05:
+                    self.alignment_forward_sign = 1.0 if vx >= 0.0 else -1.0
+                vx, vy = self.geofence.clamp_velocity(nav_x, nav_y, vx, vy)
+                local_vx, local_vy = self.frame_mapper.local_velocity_from_nav(vx, vy)
+                self.velocity_pub.publish(String(data=command_json("velocity", vx=local_vx, vy=local_vy, vz=self._restore_search_altitude_vz())))
         elif state in (MissionState.TARGET_CANDIDATE, MissionState.TARGET_ALIGN, MissionState.TARGET_VERIFY):
             if selected is not None:
                 vx, vy = self.alignment.velocity_from_center(tuple(selected["center"]), self.alignment_forward_sign)
@@ -426,26 +528,40 @@ class MissionManagerNode(Node):
             "coordinate_frame": self.frame_mapper.mode,
             "alignment_forward_sign": self.alignment_forward_sign,
             "timestamp": time.time(),
+            **self._field_status(),
             **search_status,
         }
         self.state_pub.publish(String(data=json.dumps(payload, separators=(",", ":"))))
 
     def _search_status(self) -> dict:
         start_from_x_max = bool(self.search_start_from_x_max) if self.search_start_from_x_max is not None else False
-        points = self.search.waypoints_from_start(start_from_x_max)
+        search = self.field_search or self.search
+        points = search.waypoints_from_start(start_from_x_max)
         if not points:
-            return {"search_index": self.search_index, "search_axis": "-", "search_target": None}
+            return {
+                "search_index": self.search_index,
+                "search_axis": "-",
+                "search_target": None,
+                "search_frame": "field_ned" if self.field_search is not None else "legacy_nav",
+            }
         index = min(max(self.search_index, 0), len(points) - 1)
         tx, ty = points[index]
         axis = "initial"
         if index > 0:
-            px, py = points[index - 1]
-            axis = "x" if abs(tx - px) >= abs(ty - py) else "y"
+            if self.field_search is not None:
+                uv_points = self.field_search.pattern.waypoints_from_start(start_from_x_max)
+                pu, pv = uv_points[index - 1]
+                tu, tv = uv_points[index]
+                axis = "u" if abs(tu - pu) >= abs(tv - pv) else "v"
+            else:
+                px, py = points[index - 1]
+                axis = "x" if abs(tx - px) >= abs(ty - py) else "y"
         return {
             "search_index": index,
             "search_axis": axis,
             "search_target": [tx, ty],
             "search_start": "x_max" if start_from_x_max else "x_min",
+            "search_frame": "field_ned" if self.field_search is not None else "legacy_nav",
         }
 
     def _drop_estimate(self, target_type: str):

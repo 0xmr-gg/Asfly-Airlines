@@ -26,6 +26,7 @@ mission_manager_node:
     search_x_max: 100.0
     search_y_min: -12.0
     search_y_max: 12.0
+    mission_field_path: ""
     payload_dry_run: true
     payload_servo: 9
     payload_pwm: 1900

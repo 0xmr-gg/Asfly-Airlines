@@ -35,6 +35,10 @@ class MavlinkBridgeNode(Node):
         self.state_pub = self.create_publisher(String, "/drone/state", 10)
         self.local_pub = self.create_publisher(String, "/drone/local_position", 10)
         self.altitude_pub = self.create_publisher(String, "/drone/altitude", 10)
+        self.global_position_pub = self.create_publisher(String, "/drone/global_position", 10)
+        self.gps_status_pub = self.create_publisher(String, "/drone/gps_status", 10)
+        self.global_origin_pub = self.create_publisher(String, "/drone/global_origin", 10)
+        self.home_position_pub = self.create_publisher(String, "/drone/home_position", 10)
         self.status_pub = self.create_publisher(String, "/drone/status", 10)
 
         self.create_subscription(String, "/drone/cmd_mode", self.on_mode, 10)
@@ -78,6 +82,10 @@ class MavlinkBridgeNode(Node):
         self.state_pub.publish(String(data=status.state.to_json()))
         self.local_pub.publish(String(data=status.local_position.to_json()))
         self.altitude_pub.publish(String(data=status.altitude.to_json()))
+        self.global_position_pub.publish(String(data=status.global_position.to_json()))
+        self.gps_status_pub.publish(String(data=status.gps_status.to_json()))
+        self.global_origin_pub.publish(String(data=status.global_origin.to_json()))
+        self.home_position_pub.publish(String(data=status.home_position.to_json()))
 
     def on_mode(self, msg: String) -> None:
         data = json.loads(msg.data)

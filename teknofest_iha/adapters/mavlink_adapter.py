@@ -11,7 +11,7 @@ import math
 import time
 from dataclasses import dataclass
 
-from teknofest_iha.interfaces.drone_models import Altitude, DroneState, LocalPosition
+from teknofest_iha.interfaces.drone_models import Altitude, DroneState, GlobalOrigin, GlobalPosition, GpsStatus, HomePosition, LocalPosition
 
 try:
     from pymavlink import mavutil
@@ -24,6 +24,10 @@ class MavlinkStatus:
     state: DroneState
     local_position: LocalPosition
     altitude: Altitude
+    global_position: GlobalPosition
+    gps_status: GpsStatus
+    global_origin: GlobalOrigin
+    home_position: HomePosition
 
 
 class MavlinkAdapter:
@@ -39,6 +43,10 @@ class MavlinkAdapter:
         self.state = DroneState()
         self.local_position = LocalPosition()
         self.altitude = Altitude()
+        self.global_position = GlobalPosition()
+        self.gps_status = GpsStatus()
+        self.global_origin = GlobalOrigin()
+        self.home_position = HomePosition()
         self.last_gcs_heartbeat_s = 0.0
 
     def connect(self) -> DroneState:
@@ -205,7 +213,7 @@ class MavlinkAdapter:
                 continue
             if time.monotonic() >= end:
                 break
-        return MavlinkStatus(self.state, self.local_position, self.altitude)
+        return MavlinkStatus(self.state, self.local_position, self.altitude, self.global_position, self.gps_status, self.global_origin, self.home_position)
 
     def _handle_message(self, msg) -> None:
         msg_type = msg.get_type()
@@ -222,9 +230,40 @@ class MavlinkAdapter:
                 frame="NED",
             )
         elif msg_type == "GLOBAL_POSITION_INT":
+            relative_m = _mm_to_m(getattr(msg, "relative_alt", None))
+            amsl_m = _mm_to_m(getattr(msg, "alt", None))
             self.altitude = Altitude(
-                relative_m=float(msg.relative_alt) / 1000.0,
-                amsl_m=float(msg.alt) / 1000.0,
+                relative_m=relative_m if relative_m is not None else 0.0,
+                amsl_m=amsl_m,
+            )
+            self.global_position = GlobalPosition(
+                lat_deg=_deg_e7_to_deg(getattr(msg, "lat", None)),
+                lon_deg=_deg_e7_to_deg(getattr(msg, "lon", None)),
+                relative_m=relative_m,
+                amsl_m=amsl_m,
+            )
+        elif msg_type == "GPS_RAW_INT":
+            self.gps_status = GpsStatus(
+                fix_type=_maybe_int(getattr(msg, "fix_type", None)),
+                satellites_visible=_maybe_int(getattr(msg, "satellites_visible", None)),
+                eph=_maybe_float(getattr(msg, "eph", None)),
+                epv=_maybe_float(getattr(msg, "epv", None)),
+                hdop=None,
+            )
+        elif msg_type == "GPS_GLOBAL_ORIGIN":
+            self.global_origin = GlobalOrigin(
+                lat_deg=_deg_e7_to_deg(getattr(msg, "latitude", None)),
+                lon_deg=_deg_e7_to_deg(getattr(msg, "longitude", None)),
+                alt_m=_mm_to_m(getattr(msg, "altitude", None)),
+            )
+        elif msg_type == "HOME_POSITION":
+            self.home_position = HomePosition(
+                lat_deg=_deg_e7_to_deg(getattr(msg, "latitude", None)),
+                lon_deg=_deg_e7_to_deg(getattr(msg, "longitude", None)),
+                alt_m=_mm_to_m(getattr(msg, "altitude", None)),
+                x=_maybe_float(getattr(msg, "x", None)),
+                y=_maybe_float(getattr(msg, "y", None)),
+                z=_maybe_float(getattr(msg, "z", None)),
             )
 
     def _update_heartbeat(self, msg) -> None:
@@ -270,3 +309,27 @@ class MavlinkAdapter:
 
 def yaw_deg_to_rad(yaw_deg: float) -> float:
     return math.radians(yaw_deg)
+
+
+def _deg_e7_to_deg(value) -> float | None:
+    if value is None:
+        return None
+    return float(value) / 10000000.0
+
+
+def _mm_to_m(value) -> float | None:
+    if value is None:
+        return None
+    return float(value) / 1000.0
+
+
+def _maybe_float(value) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _maybe_int(value) -> int | None:
+    if value is None:
+        return None
+    return int(value)
